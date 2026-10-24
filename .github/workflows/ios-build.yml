@@ -1,0 +1,138 @@
+name: 🍎 WayShot iOS — Build Unsigned IPA (Sideloadly)
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:   # Chạy thủ công bất cứ lúc nào từ GitHub UI
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SCHEME: WayShot
+  BUNDLE_ID: com.wayshot.app
+  IOS_DEPLOYMENT_TARGET: '16.0'
+
+jobs:
+  # ── JOB 1: Unit Tests (Simulator) ───────────────────────────────────────
+  test:
+    name: 🧪 Unit Tests
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🔧 Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+          xcodebuild -version
+
+      - name: 📦 xcpretty
+        run: gem install xcpretty --no-document -q
+
+      - name: 🧪 Run Unit Tests
+        run: |
+          xcodebuild test \
+            -project WayShot.xcodeproj \
+            -scheme WayShotTests \
+            -destination 'platform=iOS Simulator,name=iPhone 15 Pro,OS=latest' \
+            -resultBundlePath TestResults.xcresult \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            2>&1 | xcpretty --color --report junit --output test-results.xml
+
+      - name: 📊 Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.run_number }}
+          path: test-results.xml
+          retention-days: 14
+
+  # ── JOB 2: Build Unsigned IPA cho Sideloadly ───────────────────────────
+  build-unsigned-ipa:
+    name: 📦 Build Unsigned IPA (Sideloadly)
+    runs-on: macos-14
+    timeout-minutes: 45
+    needs: test
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🔧 Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer
+          xcodebuild -version
+
+      - name: 📦 xcpretty
+        run: gem install xcpretty --no-document -q
+
+      - name: 🏗️ Archive (No Signing)
+        run: |
+          xcodebuild archive \
+            -project WayShot.xcodeproj \
+            -scheme ${{ env.SCHEME }} \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath ./WayShot.xcarchive \
+            IPHONEOS_DEPLOYMENT_TARGET=${{ env.IOS_DEPLOYMENT_TARGET }} \
+            PRODUCT_BUNDLE_IDENTIFIER=${{ env.BUNDLE_ID }} \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | xcpretty --color
+
+      - name: 📦 Package IPA (Unsigned)
+        run: |
+          # Lấy file .app từ archive
+          APP_PATH=$(find WayShot.xcarchive/Products -name "*.app" -type d | head -1)
+          echo "✅ App found: $APP_PATH"
+
+          # Tạo cấu trúc IPA chuẩn
+          mkdir -p IPA_Staging/Payload
+          cp -r "$APP_PATH" IPA_Staging/Payload/
+
+          # Zip thành .ipa
+          cd IPA_Staging
+          zip -qr ../WayShot-Unsigned.ipa Payload/
+          cd ..
+
+          echo "📦 IPA size: $(du -sh WayShot-Unsigned.ipa | cut -f1)"
+
+      - name: 🔍 Verify IPA
+        run: |
+          unzip -l WayShot-Unsigned.ipa | head -20
+          echo "---"
+          echo "✅ IPA ready for Sideloadly!"
+
+      - name: 📤 Upload Unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: WayShot-Unsigned-IPA-${{ github.run_number }}
+          path: WayShot-Unsigned.ipa
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: 📋 Build Summary
+        run: |
+          echo "## 🎉 Build thành công!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Info | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Bundle ID** | ${{ env.BUNDLE_ID }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **iOS Target** | ${{ env.IOS_DEPLOYMENT_TARGET }}+ |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Build #** | ${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📱 Cài bằng Sideloadly" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download **WayShot-Unsigned-IPA-${{ github.run_number }}** từ Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "2. Mở Sideloadly trên Windows" >> $GITHUB_STEP_SUMMARY
+          echo "3. Kéo file IPA vào Sideloadly → Nhập Apple ID → Cài!" >> $GITHUB_STEP_SUMMARY
